@@ -3,9 +3,10 @@ name: Build Talos Flavor — ControlPlane Stack
 # ════════════════════════════════════════════════════════════════════════════
 # Pipeline overview
 #
-#  1. build-extensions  → build itl-branding + itl-security OCI images, push
-#                         to GHCR.  Extensions are consumed at ISO build time
-#                         directly from the OCI registry (no manual download).
+#  1. resolve-extensions → resolve the OCI extension image tag to consume.
+#                          Extensions are built and published by
+#                          ITL.Talos.HardenedOS — this job only resolves
+#                          which GHCR tag to pull at ISO build time.
 #
 #  2. generate-configs  → generate 3 machineconfig YAMLs (controlplane,
 #                         worker-infra, worker-app) by layering base patches
@@ -46,6 +47,10 @@ on:
         description: 'Extra OCI extension refs to bake into all role ISOs (space-separated)'
         required: false
         default: ''
+      extension_tag:
+        description: 'Extension image tag from ITL.Talos.HardenedOS GHCR (e.g. v1.0.0 or latest)'
+        required: false
+        default: 'latest'
 
 env:
   REGISTRY: ghcr.io
@@ -58,79 +63,38 @@ env:
   ITL_REG_URL: https://reg.itlusions.com
 
 jobs:
-  # ── Step 1: build and push the flavor's OCI extension images ────────────────
-  build-extensions:
-    name: Build & Push Extensions
+  # ── Step 1: resolve extension image tags from ITL.Talos.HardenedOS GHCR ───
+  # Extensions (itl-branding, itl-security, itl-tpm-register) are owned and
+  # published by the ITL.Talos.HardenedOS repository. This job resolves the
+  # tag to consume — it does NOT build anything.
+  resolve-extensions:
+    name: Resolve Extension Image Tags
     runs-on: ubuntu-latest
     permissions:
       contents: read
-      packages: write
+    outputs:
+      image_tag:     ${{ steps.resolve.outputs.image_tag }}
+      talos_version: ${{ steps.resolve.outputs.talos_version }}
+
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Log in to GitHub Container Registry
-        uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Resolve Talos version
-        id: version
+      - name: Resolve Talos version and extension tag
+        id: resolve
         run: |
           V="${{ github.event.inputs.talos_version }}"
           [[ -z "$V" ]] && V="${{ env.TALOS_VERSION }}"
           echo "talos_version=$V" >> "$GITHUB_OUTPUT"
-          TAG="${{ github.ref_name }}"
-          [[ -z "$TAG" || "$TAG" == refs/* ]] && TAG="latest"
-          echo "image_tag=$TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push itl-branding
-        uses: docker/build-push-action@v5
-        with:
-          context: extensions/itl-branding
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.REGISTRY }}/itlusions/itl-talos-hardened-os-branding:${{ steps.version.outputs.image_tag }}
-            ${{ env.REGISTRY }}/itlusions/itl-talos-hardened-os-branding:${{ env.FLAVOR }}-latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          EXT_TAG="${{ github.event.inputs.extension_tag }}"
+          [[ -z "$EXT_TAG" ]] && EXT_TAG="latest"
+          echo "image_tag=$EXT_TAG" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push itl-security
-        uses: docker/build-push-action@v5
-        with:
-          context: extensions/itl-security
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.REGISTRY }}/itlusions/itl-talos-hardened-os-security:${{ steps.version.outputs.image_tag }}
-            ${{ env.REGISTRY }}/itlusions/itl-talos-hardened-os-security:${{ env.FLAVOR }}-latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push itl-tpm-register
-        uses: docker/build-push-action@v5
-        with:
-          context: extensions/itl-tpm-register
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: |
-            ${{ env.REGISTRY }}/itlusions/itl-talos-tpm-register:${{ steps.version.outputs.image_tag }}
-            ${{ env.REGISTRY }}/itlusions/itl-talos-tpm-register:${{ env.FLAVOR }}-latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-    outputs:
-      image_tag: ${{ steps.version.outputs.image_tag }}
-      talos_version: ${{ steps.version.outputs.talos_version }}
+          echo "[OK] Talos: $V  Extension tag: $EXT_TAG"
 
   # ── Step 2: generate Talos configs with all patches layered ─────────────────
   generate-configs:
     name: Generate ControlPlane Stack Configs
     runs-on: ubuntu-latest
-    needs: [build-extensions]
+    needs: [resolve-extensions]
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -138,7 +102,7 @@ jobs:
       - name: Install talosctl
         run: |
           curl -Lo /usr/local/bin/talosctl \
-            https://github.com/siderolabs/talos/releases/download/${{ needs.build-extensions.outputs.talos_version }}/talosctl-linux-amd64
+            https://github.com/siderolabs/talos/releases/download/${{ needs.resolve-extensions.outputs.talos_version }}/talosctl-linux-amd64
           chmod +x /usr/local/bin/talosctl
           talosctl version --client
 
@@ -244,7 +208,7 @@ jobs:
 
       - name: Inject extensions into final configs
         run: |
-          TAG=${{ needs.build-extensions.outputs.image_tag }}
+          TAG=${{ needs.resolve-extensions.outputs.image_tag }}
           OUT=config/output/${{ env.FLAVOR }}
 
           yq eval ".machine.install.extensions += [
@@ -350,7 +314,7 @@ jobs:
     name: Build Bootable ISOs
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/')
-    needs: [build-extensions, stage-configs]
+    needs: [resolve-extensions, stage-configs]
     permissions:
       contents: read
       packages: read
@@ -368,7 +332,7 @@ jobs:
 
       - name: Pull Talos Imager
         run: |
-          TALOS_VER=${{ needs.build-extensions.outputs.talos_version }}
+          TALOS_VER=${{ needs.resolve-extensions.outputs.talos_version }}
           docker pull ghcr.io/siderolabs/imager:${TALOS_VER}
           echo "[OK] Imager pulled: ${TALOS_VER}"
 
@@ -388,8 +352,8 @@ jobs:
 
       - name: Build — ControlPlane ISO
         run: |
-          TALOS_VER=${{ needs.build-extensions.outputs.talos_version }}
-          IMG_TAG=${{ needs.build-extensions.outputs.image_tag }}
+          TALOS_VER=${{ needs.resolve-extensions.outputs.talos_version }}
+          IMG_TAG=${{ needs.resolve-extensions.outputs.image_tag }}
           CONFIG_URL="${{ needs.stage-configs.outputs.cp_config_url }}"
           mkdir -p iso-output
 
@@ -429,8 +393,8 @@ jobs:
 
       - name: Build — Worker Infra ISO
         run: |
-          TALOS_VER=${{ needs.build-extensions.outputs.talos_version }}
-          IMG_TAG=${{ needs.build-extensions.outputs.image_tag }}
+          TALOS_VER=${{ needs.resolve-extensions.outputs.talos_version }}
+          IMG_TAG=${{ needs.resolve-extensions.outputs.image_tag }}
           CONFIG_URL="${{ needs.stage-configs.outputs.wi_config_url }}"
 
           EXTRA_EXT_ARGS=()
@@ -464,8 +428,8 @@ jobs:
 
       - name: Build — Worker App ISO
         run: |
-          TALOS_VER=${{ needs.build-extensions.outputs.talos_version }}
-          IMG_TAG=${{ needs.build-extensions.outputs.image_tag }}
+          TALOS_VER=${{ needs.resolve-extensions.outputs.talos_version }}
+          IMG_TAG=${{ needs.resolve-extensions.outputs.image_tag }}
           CONFIG_URL="${{ needs.stage-configs.outputs.wa_config_url }}"
 
           EXTRA_EXT_ARGS=()
@@ -503,8 +467,8 @@ jobs:
           # This is the official approach — same tool, same extension sets as the ISO builds.
           # The kernel binary is the same for all roles; the initramfs differs because
           # ControlPlane includes intel-ucode while workers do not.
-          TALOS_VER=${{ needs.build-extensions.outputs.talos_version }}
-          IMG_TAG=${{ needs.build-extensions.outputs.image_tag }}
+          TALOS_VER=${{ needs.resolve-extensions.outputs.talos_version }}
+          IMG_TAG=${{ needs.resolve-extensions.outputs.image_tag }}
           mkdir -p netboot-assets
 
           # Reconstruct extra extension args from prep step
@@ -574,9 +538,6 @@ jobs:
           done
           rm -rf netboot-assets/_worker-tmp
 
-          # Copy iPXE menu alongside assets
-          cp netboot/menu.ipxe netboot-assets/
-
           echo "[*] Netboot assets summary:"
           find netboot-assets -type f | sort
 
@@ -639,7 +600,6 @@ jobs:
             isos/*.iso.sha256
             itl-cpstack-configs-${{ github.ref_name }}.tar.gz
             itl-cpstack-configs-${{ github.ref_name }}.tar.gz.sha256
-            netboot/menu.ipxe
             netboot/cpstack-*/**
           body: |
             # ITL Talos — ControlPlane Stack ${{ github.ref_name }}
@@ -704,7 +664,7 @@ jobs:
     name: Notify Build Status
     runs-on: ubuntu-latest
     if: always()
-    needs: [build-extensions, generate-configs, build-isos]
+    needs: [resolve-extensions, generate-configs, build-isos]
     steps:
       - name: Log completion
         run: |

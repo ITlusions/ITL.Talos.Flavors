@@ -1,0 +1,16 @@
+# Generated configs (created at build / runtime)
+config/generated/
+config/output/
+
+# ISO files
+*.iso
+*.iso.sha256
+
+# Build artifacts
+iso-output/
+netboot-assets/
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+*.swp
