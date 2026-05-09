@@ -63,32 +63,19 @@ env:
   ITL_REG_URL: https://reg.itlusions.com
 
 jobs:
-  # ── Step 1: resolve extension image tags from ITL.Talos.HardenedOS GHCR ───
-  # Extensions (itl-branding, itl-security, itl-tpm-register) are owned and
-  # published by the ITL.Talos.HardenedOS repository. This job resolves the
-  # tag to consume — it does NOT build anything.
+  # ── Step 1: build & push extensions via reusable workflow ──────────────────
+  # Extensions are built and published by ITL.Talos.HardenedOS.
+  # This calls the reusable workflow directly so the Flavors pipeline always
+  # has freshly pushed images available before generating configs and ISOs.
   resolve-extensions:
-    name: Resolve Extension Image Tags
-    runs-on: ubuntu-latest
+    name: Build & Push Extensions
+    uses: ITlusions/ITL.Talos.HardenedOS/.github/workflows/build-extensions.yaml@main
+    with:
+      talos_version: ${{ inputs.talos_version }}
+      image_tag: ${{ inputs.extension_tag }}
     permissions:
       contents: read
-    outputs:
-      image_tag:     ${{ steps.resolve.outputs.image_tag }}
-      talos_version: ${{ steps.resolve.outputs.talos_version }}
-
-    steps:
-      - name: Resolve Talos version and extension tag
-        id: resolve
-        run: |
-          V="${{ github.event.inputs.talos_version }}"
-          [[ -z "$V" ]] && V="${{ env.TALOS_VERSION }}"
-          echo "talos_version=$V" >> "$GITHUB_OUTPUT"
-
-          EXT_TAG="${{ github.event.inputs.extension_tag }}"
-          [[ -z "$EXT_TAG" ]] && EXT_TAG="latest"
-          echo "image_tag=$EXT_TAG" >> "$GITHUB_OUTPUT"
-
-          echo "[OK] Talos: $V  Extension tag: $EXT_TAG"
+      packages: write
 
   # ── Step 2: generate Talos configs with all patches layered ─────────────────
   generate-configs:
