@@ -1,0 +1,160 @@
+# Bootstrap Manifest: HorizontalPodAutoscaler defaults for app-tier services
+#
+# Configures HPA for stateless app-tier services so they scale out under load
+# and scale back in when idle.
+#
+# Policy (all services):
+#   minReplicas : 2  — always 2 replicas for HA (survives 1 node failure)
+#   maxReplicas : 10 — hard ceiling; adjust per service based on capacity
+#   CPU target  : 70% of requested CPU
+#
+# Prerequisites:
+#   - metrics-server must be running (installed by default in Talos clusters)
+#   - Each Deployment must have resources.requests.cpu set
+#
+# Services covered:
+#   itl-api-gateway, itl-core-provider, itl-identity-provider,
+#   itl-iam-provider, itl-dashboard, itl-portal
+#
+# Update the Deployment names to match your Helm release names.
+#
+# Apply after cluster bootstrap:
+#   kubectl apply -f manifests/12-hpa-defaults.yaml
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-api-gateway
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: itl-api-gateway
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-core-provider
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: itl-core-provider
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-identity-provider
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: itl-identity-provider
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-iam-provider
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: itl-iam-provider
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-dashboard
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: itl-dashboard
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: hpa-portal
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: itl-portal
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70

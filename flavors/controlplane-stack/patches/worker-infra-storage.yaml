@@ -1,0 +1,43 @@
+# Talos Flavor Patch: Additional Persistent Storage for worker-infra nodes
+#
+# Applied ONLY to worker-infra-final.yaml.
+#
+# The base cp-storage.yaml (applied to all nodes) already provides:
+#   /var/local-path-provisioner   — default PVC working dir
+#   /var/lib/neo4j                — Neo4j dedicated mount
+#
+# This patch adds per-service bind mounts for PostgreSQL, Redis, and RabbitMQ.
+# All paths use the same bind+rshared+rw options so kubelet can see them from
+# inside its mount namespace, and PVs survive kubelet restarts.
+#
+# Filesystem layout on the infra node after provisioning:
+#   /var/lib/postgresql   — PostgreSQL data directory
+#   /var/lib/redis        — Redis RDB / AOF files
+#   /var/lib/rabbitmq     — RabbitMQ Mnesia database + message store
+
+machine:
+  kubelet:
+    extraMounts:
+      - destination: /var/lib/postgresql
+        type: bind
+        source: /var/lib/postgresql
+        options:
+          - bind
+          - rshared
+          - rw
+
+      - destination: /var/lib/redis
+        type: bind
+        source: /var/lib/redis
+        options:
+          - bind
+          - rshared
+          - rw
+
+      - destination: /var/lib/rabbitmq
+        type: bind
+        source: /var/lib/rabbitmq
+        options:
+          - bind
+          - rshared
+          - rw

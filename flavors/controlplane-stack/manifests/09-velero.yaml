@@ -1,0 +1,77 @@
+# Bootstrap Manifest: Velero Backup — ControlPlane Stack
+#
+# Installs Velero for backup/restore of Kubernetes resources and PVCs on
+# infra nodes (PostgreSQL, Neo4j, Redis, RabbitMQ).
+#
+# What this installs:
+#   1. Velero Namespace
+#   2. Velero via Helm (restic file-system backup plugin included)
+#   3. BackupStorageLocation pointing to an S3-compatible endpoint
+#   4. A daily Schedule that backs up the itl-controlplane namespace
+#
+# Prerequisites (apply manually or via Helm values overlay):
+#   - An S3-compatible bucket reachable from the cluster
+#   - A Kubernetes Secret "velero-credentials" in namespace "velero" with
+#     content:
+#       cloud: |
+#         [default]
+#         aws_access_key_id=<key>
+#         aws_secret_access_key=<secret>
+#
+# Apply after cluster bootstrap:
+#   kubectl apply -f manifests/09-velero.yaml
+#
+# Then create the credentials secret:
+#   kubectl create secret generic velero-credentials \
+#     --namespace velero \
+#     --from-literal cloud="[default]
+#   aws_access_key_id=<key>
+#   aws_secret_access_key=<secret>"
+
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: velero
+  labels:
+    itl.io/managed-by: talos-flavor
+
+---
+# Velero is installed via Helm — this manifest documents the recommended
+# Helm install command. Run after applying this file.
+#
+#   helm repo add vmware-tanzu https://vmware-tanzu.github.io/helm-charts
+#   helm upgrade --install velero vmware-tanzu/velero \
+#     --namespace velero \
+#     --version 7.x \
+#     --set-json 'configuration.backupStorageLocation[0]={"name":"default","provider":"aws","bucket":"<YOUR_BUCKET>","config":{"region":"<REGION>","s3Url":"<S3_ENDPOINT>"}}' \
+#     --set credentials.existingSecret=velero-credentials \
+#     --set defaultVolumesToFsBackup=true \
+#     --set deployNodeAgent=true \
+#     --set nodeAgent.tolerations[0].key=itl.io/role \
+#     --set nodeAgent.tolerations[0].operator=Exists \
+#     --set nodeAgent.tolerations[0].effect=NoSchedule
+
+---
+# Daily backup: full itl-controlplane namespace + PVC snapshots via restic.
+# Schedule: 02:00 UTC every day. Retains last 14 backups (~2 weeks).
+apiVersion: velero.io/v1
+kind: Schedule
+metadata:
+  name: daily-itl-controlplane
+  namespace: velero
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  # Cron: minute hour day month weekday
+  schedule: "0 2 * * *"
+  template:
+    includedNamespaces:
+      - itl-controlplane
+      - itl-monitoring
+    storageLocation: default
+    ttl: 336h0m0s           # 14 days
+    snapshotVolumes: false   # use restic fs-backup (works with local-path PVCs)
+    defaultVolumesToFsBackup: true
+    labelSelector:
+      matchExpressions: []

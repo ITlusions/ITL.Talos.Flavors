@@ -1,0 +1,40 @@
+# Talos Flavor Patch: Node Taint + Kubelet Tuning for worker-app nodes
+#
+# Applied ONLY to worker-app-final.yaml.
+#
+# Taint: itl.io/role=app:NoSchedule
+#   Prevents infra-tier workloads (databases) from being rescheduled onto app
+#   nodes when infra nodes are temporarily unavailable.  App-tier Deployments
+#   are deployed with this toleration via the Helm values overlay.
+#
+# CPU Manager: static policy
+#   Gives the API gateway and provider containers guaranteed CPU cores instead
+#   of time-sharing. Requires integer CPU requests in the pod spec
+#   (e.g. resources.requests.cpu: "1").  Best-effort topology manager ensures
+#   CPU + memory NUMA affinity without hard failures.
+#
+# Resource reservations are lower than infra nodes because app containers are
+# lighter-weight and ephemeral.
+
+machine:
+  nodeTaints:
+    itl.io/role: "app:NoSchedule"
+
+  kubelet:
+    extraArgs:
+      # ── CPU Manager ──────────────────────────────────────────────────
+      # static policy: containers with integer CPU requests get dedicated cores.
+      cpu-manager-policy: static
+      # best-effort: try to align CPU + memory to the same NUMA node.
+      topology-manager-policy: best-effort
+
+      # ── Resource reservations ────────────────────────────────────────
+      system-reserved: "cpu=300m,memory=512Mi,ephemeral-storage=2Gi"
+      kube-reserved: "cpu=200m,memory=256Mi"
+      eviction-hard: "memory.available<256Mi,nodefs.available<5%"
+      eviction-soft: "memory.available<512Mi,nodefs.available<8%"
+      eviction-soft-grace-period: "memory.available=90s,nodefs.available=2m"
+
+      # ── Image GC ─────────────────────────────────────────────────────
+      image-gc-high-threshold: "85"
+      image-gc-low-threshold: "75"

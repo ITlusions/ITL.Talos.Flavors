@@ -1,0 +1,76 @@
+# Bootstrap Manifest: PodDisruptionBudgets for infra-tier stateful services
+#
+# Prevents Kubernetes from evicting the last running replica of a stateful
+# service during node drain operations (upgrades, maintenance).
+#
+# Policy: minAvailable: 1
+#   At least one pod must remain available at all times.
+#   This allows rolling upgrades while blocking complete eviction.
+#
+# Covers: PostgreSQL, Neo4j, Redis, RabbitMQ
+#
+# Assumption: all stateful services are deployed in namespace itl-controlplane.
+# Update selectors if your Helm release names differ.
+#
+# Apply after cluster bootstrap:
+#   kubectl apply -f manifests/11-pdb-infra.yaml
+
+---
+# PostgreSQL — Bitnami chart deploys with app.kubernetes.io/name=postgresql
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-postgresql
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: postgresql
+
+---
+# Neo4j — deploys with app.kubernetes.io/name=neo4j
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-neo4j
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: neo4j
+
+---
+# Redis — Bitnami chart uses app.kubernetes.io/name=redis
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-redis
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: redis
+
+---
+# RabbitMQ — Bitnami chart uses app.kubernetes.io/name=rabbitmq
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-rabbitmq
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: rabbitmq

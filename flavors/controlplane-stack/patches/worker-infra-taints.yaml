@@ -1,0 +1,34 @@
+# Talos Flavor Patch: Node Taint + Kubelet Tuning for worker-infra nodes
+#
+# Applied ONLY to worker-infra-final.yaml.
+#
+# Taint: itl.io/role=infra:NoSchedule
+#   Prevents app-tier workloads from landing on infra nodes unless they
+#   explicitly tolerate the taint.  Stateful services (PostgreSQL, Neo4j,
+#   Redis, RabbitMQ) are deployed with this toleration via the Helm values
+#   overlay, so they are unaffected.
+#
+# Kubelet resource reservations are higher than the base (cp-node-labels.yaml)
+# because infra nodes run memory-intensive Java (Neo4j) and database processes.
+
+machine:
+  nodeTaints:
+    # Key=value:effect format for Talos nodeTaints
+    itl.io/role: "infra:NoSchedule"
+
+  kubelet:
+    extraArgs:
+      # ── Resource reservations ───────────────────────────────────────
+      # System daemons + OS overhead on a typical 16 GiB infra node.
+      system-reserved: "cpu=500m,memory=1Gi,ephemeral-storage=4Gi"
+      kube-reserved: "cpu=300m,memory=512Mi"
+      # Evict pods earlier on infra nodes to protect database processes.
+      eviction-hard: "memory.available<512Mi,nodefs.available<8%"
+      eviction-soft: "memory.available<1Gi,nodefs.available<12%"
+      eviction-soft-grace-period: "memory.available=2m,nodefs.available=5m"
+
+      # ── Image GC ────────────────────────────────────────────────────
+      # Infra images (Neo4j, Postgres) are large. GC aggressively to keep
+      # disk pressure low.
+      image-gc-high-threshold: "75"
+      image-gc-low-threshold: "65"

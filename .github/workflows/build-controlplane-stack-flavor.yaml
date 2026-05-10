@@ -3,30 +3,32 @@ name: Build Talos Flavor — ControlPlane Stack
 # ════════════════════════════════════════════════════════════════════════════
 # Pipeline overview
 #
-#  1. resolve-extensions → resolve the OCI extension image tag to consume.
-#                          Extensions are built and published by
-#                          ITL.Talos.HardenedOS — this job only resolves
-#                          which GHCR tag to pull at ISO build time.
+#  1. resolve-extensions → build & push ITL extension OCI images + pre-baked
+#                          installer image via ITL.Talos.HardenedOS reusable
+#                          workflow.
 #
 #  2. generate-configs  → generate 3 machineconfig YAMLs (controlplane,
 #                         worker-infra, worker-app) by layering base patches
 #                         then flavor patches.
 #
 #  3. stage-configs     → create a DRAFT GitHub Release and upload the 3 raw
-#                         machineconfig YAMLs.  This gives us stable download
-#                         URLs before the ISOs are built.
+#                         machineconfig YAMLs.
 #
-#  4. build-isos        → run ghcr.io/siderolabs/imager for each node role:
-#                           • pulls extensions directly from GHCR (OCI)
-#                           • embeds talos.config=<release-url> as a kernel
-#                             arg so nodes self-configure on first boot
-#                           → produces 3 role-specific bootable ISOs
+#  4. build-isos        → run ghcr.io/siderolabs/imager once per role to
+#                         produce 3 role-specific bootable ISOs.
+#                         No talos.config= is baked in — the USB wizard
+#                         injects a machine-specific one-time token URL
+#                         (GET /api/v1/config/{token}) after registration.
+#                         The MAC-based endpoint (GET /api/v1/config?mac=)
+#                         remains available as a secondary fallback.
 #
-#  5. finalize-release  → upload ISOs to the draft release and publish it
+#  5. finalize-release  → upload ISOs + configs; publish release.
 #
-# Zero-touch provisioning result:
-#   Boot a node from its role ISO → Talos fetches the matching machineconfig
-#   from the GitHub Release → node configures itself automatically.
+# Zero-touch provisioning (primary path — USB wizard):
+#   1. Boot USB wizard on the machine
+#   2. Wizard registers via POST /api/v1/register → gets one-time config URL
+#   3. Wizard downloads role ISO, patches GRUB with talos.config=<token-url>
+#   4. Talos installs, fetches machineconfig via one-time URL, reboots + joins
 # ════════════════════════════════════════════════════════════════════════════
 
 on:
@@ -39,12 +41,8 @@ on:
         description: 'Talos version override (e.g. v1.9.0)'
         required: false
         default: ''
-      config_base_url:
-        description: 'Base URL for machineconfig download (leave empty to use GitHub Release URL)'
-        required: false
-        default: ''
       extra_extensions:
-        description: 'Extra OCI extension refs to bake into all role ISOs (space-separated)'
+        description: 'Extra OCI extension refs to bake into the ISO (space-separated)'
         required: false
         default: ''
       extension_tag:
@@ -193,32 +191,63 @@ jobs:
 
           echo "[OK] Flavor patches applied"
 
-      - name: Inject extensions into final configs
+      - name: Set installer image and finalize configs
         run: |
-          TAG=${{ needs.resolve-extensions.outputs.image_tag }}
+          INSTALLER_IMAGE="${{ needs.resolve-extensions.outputs.installer_image }}"
           OUT=config/output/${{ env.FLAVOR }}
 
-          yq eval ".machine.install.extensions += [
-            {\"image\": \"${{ env.REGISTRY }}/itlusions/itl-talos-hardened-os-branding:${TAG}\"},
-            {\"image\": \"${{ env.REGISTRY }}/itlusions/itl-talos-hardened-os-security:${TAG}\"},
-            {\"image\": \"ghcr.io/siderolabs/gvisor:latest\"},
-            {\"image\": \"ghcr.io/siderolabs/intel-ucode:latest\"}
-          ]" "$OUT/cp-09-oidc-final.yaml" > "$OUT/controlplane-final.yaml"
+          # machine.install.image points to the pre-baked installer OCI image.
+          # All ITL extensions are already merged in — Talos uses this image
+          # both for initial install to disk and for future upgrades.
+          yq eval ".machine.install.image = \"${INSTALLER_IMAGE}\"" \
+            "$OUT/cp-09-oidc-final.yaml" > "$OUT/controlplane-final.yaml"
 
-          yq eval ".machine.install.extensions += [
-            {\"image\": \"${{ env.REGISTRY }}/itlusions/itl-talos-hardened-os-branding:${TAG}\"},
-            {\"image\": \"${{ env.REGISTRY }}/itlusions/itl-talos-hardened-os-security:${TAG}\"},
-            {\"image\": \"ghcr.io/siderolabs/gvisor:latest\"}
-          ]" "$OUT/wk-09-final-base.yaml" > "$OUT/worker-infra-final.yaml"
+          yq eval ".machine.install.image = \"${INSTALLER_IMAGE}\"" \
+            "$OUT/wk-09-final-base.yaml" > "$OUT/worker-infra-final.yaml"
 
-          # App workers: same extensions, but skip infra node label
+          # Split into infra and app worker roles via node label
           cp "$OUT/worker-infra-final.yaml" "$OUT/worker-app-final.yaml"
           yq eval '.machine.nodeLabels["itl.io/role"] = "app"' \
             -i "$OUT/worker-app-final.yaml"
           yq eval '.machine.nodeLabels["itl.io/role"] = "infra"' \
             -i "$OUT/worker-infra-final.yaml"
 
-          echo "[OK] Extensions injected; worker configs split into infra + app roles"
+          echo "[OK] Installer image set; worker configs split into infra + app roles"
+
+      - name: Apply worker role-specific patches
+        run: |
+          OUT=config/output/${{ env.FLAVOR }}
+          FD=${{ env.FLAVOR_DIR }}/patches
+
+          # ── worker-infra: sysctls + hugepages + taints + extra mounts ──────
+          # Use talosctl machineconfig patch for proper strategic merge of
+          # array fields (kernel.modules, kubelet.extraMounts, etc.).
+          talosctl machineconfig patch "$OUT/worker-infra-final.yaml" \
+            --patch @"$FD/worker-infra-sysctl.yaml" \
+            --output "$OUT/worker-infra-p1.yaml"
+          talosctl machineconfig patch "$OUT/worker-infra-p1.yaml" \
+            --patch @"$FD/worker-infra-taints.yaml" \
+            --output "$OUT/worker-infra-p2.yaml"
+          talosctl machineconfig patch "$OUT/worker-infra-p2.yaml" \
+            --patch @"$FD/worker-infra-storage.yaml" \
+            --output "$OUT/worker-infra-final.yaml"
+
+          # ── worker-app: gVisor RuntimeClass + taints + network tuning ──────
+          talosctl machineconfig patch "$OUT/worker-app-final.yaml" \
+            --patch @"$FD/worker-app-gvisor.yaml" \
+            --output "$OUT/worker-app-p1.yaml"
+          talosctl machineconfig patch "$OUT/worker-app-p1.yaml" \
+            --patch @"$FD/worker-app-taints.yaml" \
+            --output "$OUT/worker-app-p2.yaml"
+          talosctl machineconfig patch "$OUT/worker-app-p2.yaml" \
+            --patch @"$FD/worker-app-networking.yaml" \
+            --output "$OUT/worker-app-final.yaml"
+
+          # Clean up intermediate files
+          rm -f "$OUT/worker-infra-p1.yaml" "$OUT/worker-infra-p2.yaml" \
+                "$OUT/worker-app-p1.yaml"  "$OUT/worker-app-p2.yaml"
+
+          echo "[OK] Role-specific patches applied (infra: sysctl+taints+storage | app: gvisor+taints+networking)"
 
       - name: Validate all final configs
         run: |
@@ -340,19 +369,16 @@ jobs:
       - name: Build — ControlPlane ISO
         run: |
           TALOS_VER=${{ needs.resolve-extensions.outputs.talos_version }}
-          IMG_TAG=${{ needs.resolve-extensions.outputs.image_tag }}
-          CONFIG_URL="${{ needs.stage-configs.outputs.cp_config_url }}"
+          INSTALLER_IMAGE="${{ needs.resolve-extensions.outputs.installer_image }}"
           mkdir -p iso-output
 
-          # Build extra extension args from file written in prep step
           EXTRA_EXT_ARGS=()
           while IFS= read -r ext; do
             [ -n "$ext" ] && EXTRA_EXT_ARGS+=(--system-extension-image "$ext")
           done < <(cat extra-extensions.txt 2>/dev/null || true)
 
-          # The imager pulls all --system-extension-image refs from GHCR (OCI)
-          # at build time and bakes them into the squashfs/initramfs of the ISO.
-          # --extra-kernel-arg adds talos.config= so the node self-configures.
+          # No talos.config= baked in — the USB wizard injects the machine-specific
+          # one-time token URL (GET /api/v1/config/{token}) after registration.
           docker run --rm \
             -v "$PWD/iso-output:/out" \
             -e "REGISTRY_AUTH_FILE=/run/containers/auth.json" \
@@ -360,29 +386,23 @@ jobs:
             ghcr.io/siderolabs/imager:${TALOS_VER} \
             iso \
             --arch amd64 \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-hardened-os-branding:${IMG_TAG} \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-hardened-os-security:${IMG_TAG} \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-tpm-register:${IMG_TAG} \
-            --system-extension-image ghcr.io/siderolabs/gvisor:latest \
-            --system-extension-image ghcr.io/siderolabs/intel-ucode:latest \
+            --base-installer-image "${INSTALLER_IMAGE}" \
             "${EXTRA_EXT_ARGS[@]}" \
-            --extra-kernel-arg "talos.config=${CONFIG_URL}" \
             --extra-kernel-arg "itl.flavor=controlplane-stack" \
             --extra-kernel-arg "itl.role=controlplane" \
             --extra-kernel-arg "itl.reg_url=${{ env.ITL_REG_URL }}"
 
           mv iso-output/metal-amd64.iso \
-             iso-output/itl-cpstack-controlplane-${TALOS_VER}-${{ github.ref_name }}.iso
-          sha256sum iso-output/itl-cpstack-controlplane-${TALOS_VER}-${{ github.ref_name }}.iso \
-            > iso-output/itl-cpstack-controlplane-${TALOS_VER}-${{ github.ref_name }}.iso.sha256
+             iso-output/itl-cpstack-controlplane-amd64.iso
+          sha256sum iso-output/itl-cpstack-controlplane-amd64.iso \
+            > iso-output/itl-cpstack-controlplane-amd64.iso.sha256
 
           echo "[OK] ControlPlane ISO built"
 
       - name: Build — Worker Infra ISO
         run: |
           TALOS_VER=${{ needs.resolve-extensions.outputs.talos_version }}
-          IMG_TAG=${{ needs.resolve-extensions.outputs.image_tag }}
-          CONFIG_URL="${{ needs.stage-configs.outputs.wi_config_url }}"
+          INSTALLER_IMAGE="${{ needs.resolve-extensions.outputs.installer_image }}"
 
           EXTRA_EXT_ARGS=()
           while IFS= read -r ext; do
@@ -396,28 +416,23 @@ jobs:
             ghcr.io/siderolabs/imager:${TALOS_VER} \
             iso \
             --arch amd64 \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-hardened-os-branding:${IMG_TAG} \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-hardened-os-security:${IMG_TAG} \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-tpm-register:${IMG_TAG} \
-            --system-extension-image ghcr.io/siderolabs/gvisor:latest \
+            --base-installer-image "${INSTALLER_IMAGE}" \
             "${EXTRA_EXT_ARGS[@]}" \
-            --extra-kernel-arg "talos.config=${CONFIG_URL}" \
             --extra-kernel-arg "itl.flavor=controlplane-stack" \
             --extra-kernel-arg "itl.role=worker-infra" \
             --extra-kernel-arg "itl.reg_url=${{ env.ITL_REG_URL }}"
 
           mv iso-output/metal-amd64.iso \
-             iso-output/itl-cpstack-worker-infra-${TALOS_VER}-${{ github.ref_name }}.iso
-          sha256sum iso-output/itl-cpstack-worker-infra-${TALOS_VER}-${{ github.ref_name }}.iso \
-            > iso-output/itl-cpstack-worker-infra-${TALOS_VER}-${{ github.ref_name }}.iso.sha256
+             iso-output/itl-cpstack-worker-infra-amd64.iso
+          sha256sum iso-output/itl-cpstack-worker-infra-amd64.iso \
+            > iso-output/itl-cpstack-worker-infra-amd64.iso.sha256
 
           echo "[OK] Worker-Infra ISO built"
 
       - name: Build — Worker App ISO
         run: |
           TALOS_VER=${{ needs.resolve-extensions.outputs.talos_version }}
-          IMG_TAG=${{ needs.resolve-extensions.outputs.image_tag }}
-          CONFIG_URL="${{ needs.stage-configs.outputs.wa_config_url }}"
+          INSTALLER_IMAGE="${{ needs.resolve-extensions.outputs.installer_image }}"
 
           EXTRA_EXT_ARGS=()
           while IFS= read -r ext; do
@@ -431,31 +446,26 @@ jobs:
             ghcr.io/siderolabs/imager:${TALOS_VER} \
             iso \
             --arch amd64 \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-hardened-os-branding:${IMG_TAG} \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-hardened-os-security:${IMG_TAG} \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-tpm-register:${IMG_TAG} \
-            --system-extension-image ghcr.io/siderolabs/gvisor:latest \
+            --base-installer-image "${INSTALLER_IMAGE}" \
             "${EXTRA_EXT_ARGS[@]}" \
-            --extra-kernel-arg "talos.config=${CONFIG_URL}" \
             --extra-kernel-arg "itl.flavor=controlplane-stack" \
             --extra-kernel-arg "itl.role=worker-app" \
             --extra-kernel-arg "itl.reg_url=${{ env.ITL_REG_URL }}"
 
           mv iso-output/metal-amd64.iso \
-             iso-output/itl-cpstack-worker-app-${TALOS_VER}-${{ github.ref_name }}.iso
-          sha256sum iso-output/itl-cpstack-worker-app-${TALOS_VER}-${{ github.ref_name }}.iso \
-            > iso-output/itl-cpstack-worker-app-${TALOS_VER}-${{ github.ref_name }}.iso.sha256
+             iso-output/itl-cpstack-worker-app-amd64.iso
+          sha256sum iso-output/itl-cpstack-worker-app-amd64.iso \
+            > iso-output/itl-cpstack-worker-app-amd64.iso.sha256
 
           echo "[OK] Worker-App ISO built"
 
       - name: Build netboot assets
         run: |
           # Use the Talos imager directly with 'kernel' and 'initramfs' subcommands.
-          # This is the official approach — same tool, same extension sets as the ISO builds.
-          # The kernel binary is the same for all roles; the initramfs differs because
-          # ControlPlane includes intel-ucode while workers do not.
+          # --base-installer-image reuses the pre-baked installer OCI image — the same
+          # image used for ISO builds — so no individual extension pulls are needed.
           TALOS_VER=${{ needs.resolve-extensions.outputs.talos_version }}
-          IMG_TAG=${{ needs.resolve-extensions.outputs.image_tag }}
+          INSTALLER_IMAGE="${{ needs.resolve-extensions.outputs.installer_image }}"
           mkdir -p netboot-assets
 
           # Reconstruct extra extension args from prep step
@@ -481,11 +491,7 @@ jobs:
             -e "REGISTRY_AUTH_FILE=/run/containers/auth.json" \
             ghcr.io/siderolabs/imager:${TALOS_VER} \
             initramfs --arch amd64 \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-hardened-os-branding:${IMG_TAG} \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-hardened-os-security:${IMG_TAG} \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-tpm-register:${IMG_TAG} \
-            --system-extension-image ghcr.io/siderolabs/gvisor:latest \
-            --system-extension-image ghcr.io/siderolabs/intel-ucode:latest \
+            --base-installer-image "${INSTALLER_IMAGE}" \
             "${EXTRA_EXT_ARGS[@]}"
 
           # Rename to standard netboot filenames
@@ -511,10 +517,7 @@ jobs:
             -e "REGISTRY_AUTH_FILE=/run/containers/auth.json" \
             ghcr.io/siderolabs/imager:${TALOS_VER} \
             initramfs --arch amd64 \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-hardened-os-branding:${IMG_TAG} \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-hardened-os-security:${IMG_TAG} \
-            --system-extension-image ${{ env.REGISTRY }}/${{ env.IMAGE_ORG }}/itl-talos-tpm-register:${IMG_TAG} \
-            --system-extension-image ghcr.io/siderolabs/gvisor:latest \
+            --base-installer-image "${INSTALLER_IMAGE}" \
             "${EXTRA_EXT_ARGS[@]}"
 
           for ROLE in worker-infra worker-app; do
@@ -592,56 +595,45 @@ jobs:
             # ITL Talos — ControlPlane Stack ${{ github.ref_name }}
 
             Custom Talos OS flavor for the ITL ControlPlane Stack.
-            Extensions are baked into each ISO from the OCI registry (GHCR).
-            Nodes self-configure on first boot via embedded `talos.config=` kernel arg.
+            Extensions are baked into each ISO via the pre-baked installer OCI image.
+            Nodes are provisioned by the USB wizard, which injects a machine-specific
+            one-time config URL (`GET /api/v1/config/{token}`) into each ISO before install.
 
-            ## ISOs (boot these on your hardware)
+            ## ISOs (download for USB wizard)
 
-            | File | Boot on |
-            |------|---------|
-            | `itl-cpstack-controlplane-*.iso` | Control-plane nodes |
-            | `itl-cpstack-worker-infra-*.iso` | Stateful workers (PostgreSQL, Neo4j, Redis, RabbitMQ) |
-            | `itl-cpstack-worker-app-*.iso`   | Stateless workers (API Gateway, Providers, Portals) |
+            | File | Role |
+            |------|------|
+            | `itl-cpstack-controlplane-amd64.iso` | Control-plane nodes |
+            | `itl-cpstack-worker-infra-amd64.iso` | Stateful workers (PostgreSQL, Neo4j, Redis) |
+            | `itl-cpstack-worker-app-amd64.iso`   | Stateless workers (API Gateway, Providers) |
 
-            ## Extensions baked into each ISO (from GHCR OCI)
+            ## Extensions baked into each ISO
 
             | Extension | Purpose |
             |-----------|---------|
             | `itl-talos-hardened-os-branding` | ITL boot branding |
             | `itl-talos-hardened-os-security` | Hardened sysctl/audit/modprobe |
+            | `itl-talos-tpm-register` | TPM enrollment extension |
             | `siderolabs/gvisor` | gVisor container sandbox |
-            | `siderolabs/intel-ucode` | Intel microcode (control-plane only) |
+            | `siderolabs/intel-ucode` | Intel microcode |
 
             ## Zero-touch provisioning
 
             ```bash
-            # 1. Flash the matching ISO to a USB drive or set as virtual media
-            dd if=itl-cpstack-controlplane-*.iso of=/dev/sdX bs=4M status=progress
+            # 1. Boot the USB wizard ISO on the machine to provision
+            # 2. Wizard registers the machine → receives one-time config URL
+            # 3. Wizard downloads the correct role ISO and patches talos.config=<token-url>
+            # 4. Talos installs, fetches machineconfig, reboots and joins the cluster
 
-            # 2. Boot the node — it will:
-            #    a) Install Talos with baked-in extensions
-            #    b) Fetch machineconfig from this release automatically
-            #    c) Reboot and join the cluster
-
-            # 3. Bootstrap (first control-plane node only)
+            # Bootstrap (first control-plane node only)
             talosctl bootstrap --nodes <cp-ip>
-
-            # 4. Get kubeconfig
-            talosctl kubeconfig --nodes <cp-ip> --force
-
-            # 5. Deploy ControlPlane Stack via Helm
-            helm upgrade --install itl-controlplane ./helm \
-              -f helm/values.yaml \
-              -f helm-values-overlay.yaml \
-              --namespace itl-controlplane \
-              --create-namespace
             ```
 
             ## Checksums
-
-            Verify ISO integrity before flashing:
             ```bash
-            sha256sum -c itl-cpstack-controlplane-*.iso.sha256
+            sha256sum -c itl-cpstack-controlplane-amd64.iso.sha256
+            sha256sum -c itl-cpstack-worker-infra-amd64.iso.sha256
+            sha256sum -c itl-cpstack-worker-app-amd64.iso.sha256
             ```
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -659,6 +651,6 @@ jobs:
           echo "Flavor     : ${{ env.FLAVOR }}"
           echo "Commit     : ${{ github.sha }}"
           echo "Tag        : ${{ github.ref_name }}"
-          echo "Extensions : extensions pulled from GHCR (OCI) at ISO build time"
-          echo "Config URL : embedded as talos.config= kernel arg in each ISO"
+          echo "Generic ISO: itl-cpstack-generic-*.iso (single image for all roles)"
+          echo "Config URL : ${{ env.ITL_REG_URL }}/api/v1/config (MAC-based lookup)"
           echo "Run URL    : ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"

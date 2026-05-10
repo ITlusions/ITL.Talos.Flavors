@@ -1,0 +1,96 @@
+# Bootstrap Manifest: PodDisruptionBudgets for app-tier stateless services
+#
+# Ensures rolling deployments and node drain operations do not take all
+# replicas of an app-tier service offline simultaneously.
+#
+# Policy: minAvailable: 1
+#   At least one pod remains available during any voluntary disruption.
+#   Combined with minReplicas: 2 on the HPA (12-hpa-defaults.yaml), this
+#   gives zero-downtime rolling updates.
+#
+# Apply after cluster bootstrap:
+#   kubectl apply -f manifests/13-pdb-app.yaml
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-api-gateway
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: itl-api-gateway
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-core-provider
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: itl-core-provider
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-identity-provider
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: itl-identity-provider
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-iam-provider
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: itl-iam-provider
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-dashboard
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: itl-dashboard
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: pdb-portal
+  namespace: itl-controlplane
+  labels:
+    itl.io/managed-by: talos-flavor
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: itl-portal

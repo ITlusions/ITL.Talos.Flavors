@@ -1,0 +1,42 @@
+# Talos Flavor Patch: gVisor RuntimeClass for worker-app nodes
+#
+# Applied ONLY to worker-app-final.yaml.
+#
+# The ITL HardenedOS installer image includes the gVisor (runsc) extension,
+# which registers the `runsc` OCI runtime with containerd.  However, the
+# Kubernetes RuntimeClass object that makes it usable from Pod specs must be
+# created in the cluster.
+#
+# This patch injects the RuntimeClass as a Talos inlineManifest so it is
+# created during cluster bootstrap — before any workloads are scheduled.
+#
+# Usage in a Pod spec:
+#   spec:
+#     runtimeClassName: gvisor
+#
+# The scheduling.nodeSelector ensures gVisor pods are only scheduled on
+# app nodes (where the runtime is installed).  Infra nodes run without gVisor
+# because database JVM processes are incompatible with gVisor's syscall
+# interception overhead.
+#
+# Reference: https://gvisor.dev/docs/user_guide/kubernetes/
+
+cluster:
+  inlineManifests:
+    - name: gvisor-runtimeclass
+      contents: |
+        apiVersion: node.k8s.io/v1
+        kind: RuntimeClass
+        metadata:
+          name: gvisor
+          labels:
+            itl.io/managed-by: talos-flavor
+        handler: runsc
+        scheduling:
+          nodeSelector:
+            itl.io/role: app
+          tolerations:
+            - key: "itl.io/role"
+              operator: "Equal"
+              value: "app"
+              effect: "NoSchedule"

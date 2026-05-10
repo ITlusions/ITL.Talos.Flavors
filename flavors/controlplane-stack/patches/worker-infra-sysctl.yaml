@@ -1,0 +1,39 @@
+# Talos Flavor Patch: Kernel Tuning for worker-infra nodes
+#
+# Applied ONLY to worker-infra-final.yaml (stateful services).
+# Addresses requirements from:
+#   Redis   — vm.overcommit_memory=1 (prevents MISCONF on AOF persistence)
+#             vm.swappiness=1 (minimise swap, keep data in RAM)
+#   RabbitMQ — net.core.somaxconn (connection backlog for high-throughput queues)
+#              net.ipv4.tcp_keepalive_time (detect dead consumers faster)
+#   PostgreSQL / Neo4j — vm.nr_hugepages (2 MiB huge pages for buffer pool)
+#                        vm.swappiness=1
+#
+# These params are safe on dedicated infra nodes. Do NOT apply to CP or app nodes.
+
+machine:
+  sysctls:
+    # ── Redis ──────────────────────────────────────────────────────────
+    # Required for background save / AOF rewrite to work without OOM errors.
+    vm.overcommit_memory: "1"
+    # Minimise swap use; infra nodes should rely on RAM not swap.
+    vm.swappiness: "1"
+
+    # ── RabbitMQ ───────────────────────────────────────────────────────
+    # Maximum socket backlog — default 128 is too low for high-throughput queues.
+    net.core.somaxconn: "65535"
+    # Detect dead TCP connections to consumers in 5 min instead of 2 h.
+    net.ipv4.tcp_keepalive_time: "300"
+    net.ipv4.tcp_keepalive_intvl: "60"
+    net.ipv4.tcp_keepalive_probes: "9"
+
+    # ── PostgreSQL / Neo4j — huge pages ────────────────────────────────
+    # 512 × 2 MiB = 1 GiB reserved. Adjust based on available RAM.
+    # PostgreSQL uses huge pages when huge_pages=try/on in postgresql.conf.
+    vm.nr_hugepages: "512"
+
+  kernel:
+    modules:
+      # NVMe-oF initiator — allows using shared NVMe storage over Ethernet if
+      # the cluster grows to a SAN-attached model later (harmless if unused).
+      - name: nvme_tcp
